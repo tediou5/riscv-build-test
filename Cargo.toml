@@ -39,9 +39,9 @@ overflow-checks = true
 rpath = false
 
 [dependencies]
-rsa = { version = "0.9.7", default-features = false }
 rand_core = { version = "0.6.4" }
 wee_alloc = { version = "0.4.5", features = ["static_array_backend"] }
+k256 = { version = "0.13.4", features = ["schnorr"], default-features = false }
 
 [dev-dependencies]
 rand = { version = "0.8.4" }

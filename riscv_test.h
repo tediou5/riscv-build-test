@@ -10,38 +10,36 @@
  * Parameters:
  *   - next_u8: a function pointer to a function that returns a random u8
  * Returns:
- *   - a pointer to a new cryptor
+ *   - a pointer to a new signature
  * Note:
- *   - the cryptor must be dropped using `drop_cryptor`
+ *   - the signature must be dropped using `drop_signature`
  */
-const void *new_cryptor(uint8_t (*next_u8)(void));
+const void *new_signature(uint8_t (*next_u8)(void));
 
 /**
  * Parameters:
  *   - ptr: a pointer to a cryptor
- *   - data: a pointer to the data to be encrypted
- *   - len: the length of the data
- *   - out_len: a pointer to the length of the encrypted data, 0 if failed
+ *   - data: message to be signed
+ *   - out: a pointer to the length of the encrypted data, 0 if failed
  * Returns:
- *   - a pointer of the encrypted data
+ *   - the signature data
  */
-const uint8_t *encrypt(const void *ptr, const uint8_t *data, uintptr_t len, uintptr_t *out_len);
+void sign(const void *ptr, const uint8_t (*data)[32], uint8_t (*out)[64]);
 
 /**
  * Parameters:
  *   - ptr: a pointer to a cryptor
- *   - data: a pointer to the data to be decrypted
- *   - len: the length of the data
- *   - out_len: a pointer to the length of the decrypted data, 0 if failed
+ *   - data: message to be verified
+ *   - signature_bytes: signature to be verified
  * Returns:
- *   - a pointer of the decrypted data
+ *   - true if the signature is valid, false otherwise
  */
-const uint8_t *decrypt(const void *ptr, const uint8_t *data, uintptr_t len, uintptr_t *out_len);
+bool verify(const void *ptr, const uint8_t (*data)[32], const uint8_t (*signature_bytes)[64]);
 
 /**
  * Note:
- *   - the cryptor must be dropped using this function
+ *   - the signature must be dropped using this function
  */
-void drop_cryptor(const void *ptr);
+void drop_signature(const void *ptr);
 
 #endif  /* riscv_test_h */

@@ -12,10 +12,11 @@ static ALLOC: wee_alloc::WeeAlloc = wee_alloc::WeeAlloc::INIT;
 
 #[cfg(not(test))]
 use alloc::boxed::Box;
-#[cfg(not(test))]
-use alloc::vec::Vec;
+use k256::schnorr::{
+    signature::{Signer, Verifier},
+    SigningKey, VerifyingKey,
+};
 use rand_core::RngCore;
-use rsa::{Pkcs1v15Encrypt, RsaPrivateKey, RsaPublicKey};
 
 #[cfg(not(test))]
 #[panic_handler]
@@ -24,22 +25,22 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 }
 
 pub struct Key {
-    private_key: RsaPrivateKey,
-    public_key: RsaPublicKey,
-    rng: EmbeddedRng,
+    signing_key: SigningKey,
+    verifying_key: VerifyingKey,
 }
 
 impl Key {
-    fn encrypt(&self, data: &[u8]) -> Vec<u8> {
-        self.public_key
-            .encrypt(&mut self.rng.clone(), Pkcs1v15Encrypt, data)
-            .unwrap_or_default()
+    fn sign(&self, data: &[u8; 32]) -> [u8; 64] {
+        let signature = self.signing_key.sign(data); // returns `k256::schnorr::Signature`
+        signature.to_bytes()
     }
 
-    fn decrypt(&self, data: &[u8]) -> Vec<u8> {
-        self.private_key
-            .decrypt(Pkcs1v15Encrypt, data)
-            .unwrap_or_default()
+    fn verify(&self, data: &[u8; 32], signature_bytes: &[u8; 64]) -> bool {
+        let Ok(signature) = k256::schnorr::Signature::try_from((*signature_bytes).as_slice())
+        else {
+            return false;
+        };
+        self.verifying_key.verify(data, &signature).is_ok()
     }
 }
 
@@ -54,13 +55,12 @@ impl EmbeddedRng {
         Self { next_u8 }
     }
 
-    fn new_key(mut self, bits: usize) -> Key {
-        let private_key = RsaPrivateKey::new(&mut self, bits).expect("生成私钥失败");
-        let public_key = RsaPublicKey::from(&private_key);
+    fn new_key(mut self) -> Key {
+        let signing_key = SigningKey::random(&mut self);
+        let verifying_key = *signing_key.verifying_key();
         Key {
-            private_key,
-            public_key,
-            rng: self,
+            signing_key,
+            verifying_key,
         }
     }
 }
@@ -95,62 +95,46 @@ impl rand_core::CryptoRng for EmbeddedRng {}
 /// Parameters:
 ///   - next_u8: a function pointer to a function that returns a random u8
 /// Returns:
-///   - a pointer to a new cryptor
+///   - a pointer to a new signature
 /// Note:
-///   - the cryptor must be dropped using `drop_cryptor`
+///   - the signature must be dropped using `drop_signature`
 #[no_mangle]
-pub extern "C" fn new_cryptor(next_u8: extern "C" fn() -> u8) -> *const () {
+pub extern "C" fn new_signature(next_u8: extern "C" fn() -> u8) -> *const () {
     let rng = EmbeddedRng::new(next_u8);
-    let key = rng.new_key(2048);
+    let key = rng.new_key();
     Box::into_raw(Box::new(key)) as *const ()
 }
 
 /// Parameters:
 ///   - ptr: a pointer to a cryptor
-///   - data: a pointer to the data to be encrypted
-///   - len: the length of the data
-///   - out_len: a pointer to the length of the encrypted data, 0 if failed
+///   - data: message to be signed
+///   - out: a pointer to the length of the encrypted data, 0 if failed
 /// Returns:
-///   - a pointer of the encrypted data
+///   - the signature data
 #[no_mangle]
-pub extern "C" fn encrypt(
-    ptr: *const (),
-    data: *const u8,
-    len: usize,
-    out_len: *mut usize,
-) -> *const u8 {
+pub extern "C" fn sign(ptr: *const (), data: &[u8; 32], out: *mut [u8; 64]) {
     let key = unsafe { &*(ptr as *const Key) };
-    let data = unsafe { core::slice::from_raw_parts(data, len) };
-    let encrypted = key.encrypt(data).into_boxed_slice();
-    unsafe { *out_len = encrypted.len() };
-    Box::into_raw(encrypted) as *const u8
+    let signature = key.sign(data);
+    let out = unsafe { &mut *out };
+    out.copy_from_slice(&signature);
 }
 
 /// Parameters:
 ///   - ptr: a pointer to a cryptor
-///   - data: a pointer to the data to be decrypted
-///   - len: the length of the data
-///   - out_len: a pointer to the length of the decrypted data, 0 if failed
+///   - data: message to be verified
+///   - signature_bytes: signature to be verified
 /// Returns:
-///   - a pointer of the decrypted data
+///   - true if the signature is valid, false otherwise
 #[no_mangle]
-pub extern "C" fn decrypt(
-    ptr: *const (),
-    data: *const u8,
-    len: usize,
-    out_len: *mut usize,
-) -> *const u8 {
+pub extern "C" fn verify(ptr: *const (), data: &[u8; 32], signature_bytes: &[u8; 64]) -> bool {
     let key = unsafe { &*(ptr as *const Key) };
-    let data = unsafe { core::slice::from_raw_parts(data, len) };
-    let decrypted = key.decrypt(data);
-    unsafe { *out_len = decrypted.len() };
-    Box::into_raw(decrypted.into_boxed_slice()) as *const u8
+    key.verify(data, signature_bytes)
 }
 
 /// Note:
-///   - the cryptor must be dropped using this function
+///   - the signature must be dropped using this function
 #[no_mangle]
-pub extern "C" fn drop_cryptor(ptr: *const ()) {
+pub extern "C" fn drop_signature(ptr: *const ()) {
     unsafe {
         let _ = Box::from_raw(ptr as *mut Key);
     };
@@ -159,6 +143,7 @@ pub extern "C" fn drop_cryptor(ptr: *const ()) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::Rng;
 
     extern "C" fn next_u8() -> u8 {
         rand::random()
@@ -166,26 +151,24 @@ mod tests {
 
     #[test]
     fn test_encrypt_decrypt() {
-        let rng = EmbeddedRng::new(next_u8);
-        let key = rng.new_key(1024);
-        let msg = b"Hello";
-        let encrypted = key.encrypt(msg);
-        let decrypted = key.decrypt(&encrypted);
-        assert_eq!(msg.to_vec(), decrypted);
+        let mut rng = EmbeddedRng::new(next_u8);
+        let mut message = [0u8; 32];
+        rng.fill(&mut message);
+        let key = rng.new_key();
+        let signature = key.sign(&message);
+        assert!(key.verify(&message, &signature));
     }
 
     #[test]
     fn test_c_api_encrypt_decrypt() {
-        let key_ptr = new_cryptor(next_u8);
-        let msg = b"Hello";
-        let mut encrypted_len = 0;
-        let mut decrypted_len = 0;
+        let key_ptr = new_signature(next_u8);
 
-        let encrypted = encrypt(key_ptr, msg.as_ptr(), msg.len(), &mut encrypted_len);
-        let decrypted = decrypt(key_ptr, encrypted, encrypted_len, &mut decrypted_len);
-        drop_cryptor(key_ptr);
-        assert_eq!(msg.to_vec(), unsafe {
-            Vec::from_raw_parts(decrypted as *mut u8, decrypted_len, decrypted_len)
-        });
+        let mut signature = [0u8; 64];
+        let mut rng = EmbeddedRng::new(next_u8);
+        let mut message = [0u8; 32];
+        rng.fill(&mut message);
+
+        sign(key_ptr, &message, &mut signature);
+        assert!(verify(key_ptr, &message, &signature));
     }
 }
