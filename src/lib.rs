@@ -150,7 +150,7 @@ mod tests {
     }
 
     #[test]
-    fn test_encrypt_decrypt() {
+    fn test_sign() {
         let mut rng = EmbeddedRng::new(next_u8);
         let mut message = [0u8; 32];
         rng.fill(&mut message);
@@ -160,7 +160,7 @@ mod tests {
     }
 
     #[test]
-    fn test_c_api_encrypt_decrypt() {
+    fn test_c_api_sign() {
         let key_ptr = new_signature(next_u8);
 
         let mut signature = [0u8; 64];
